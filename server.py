@@ -1,45 +1,57 @@
+from server_side_keys import generate_server_key, get_client_certificate
+
 import os
 from flask import Flask, request, jsonify
 import base64
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.hazmat.primitives.serialization import pkcs12, Encoding
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 
 app = Flask(__name__)
+challenge = ""
 
-def load_private_key():
-    with open("server_private_key.p12", "rb") as f:
-        p12_data = f.read()
-    private_key, _, _ = pkcs12.load_key_and_certificates(p12_data, b"server_password")
-    return private_key
+@app.route("/registrar", methods=["POST"])
+def registrar():
+    email = request.json["email"]
+    certificado = request.json["cert"].encode()
+
+    cert = x509.load_pem_x509_certificate(certificado)
+
+    with open(f"./server/{email}.cert", "wb") as f:
+        f.write(cert.public_bytes(Encoding.PEM))
+    
+    print(f"Registro bem-sucedido ({email})")
+    return jsonify({"success": True})
 
 @app.route("/request-challenge", methods=["POST"])
 def request_challenge():
-    email = request.json["email"]
+    global challenge
     challenge = base64.b64encode(os.urandom(32)).decode()
-    print(f"Desafio gerado para o email {email}: {challenge}")
+
     return jsonify({"challenge": challenge})
 
 @app.route("/authenticate", methods=["POST"])
 def authenticate():
-    private_key = load_private_key()
-    challenge = request.json["challenge"]
-    response = request.json["response"]
+    email = request.json["email"]
+    challenge_assinatura = base64.b64decode(request.json["resolution"].encode()) #
+
+    certificado = get_client_certificate(email)
+    public_key_cliente = certificado.public_key()
+    #print("assinatura: ", challenge_assinatura, "\nchallenge: ", base64.b64decode(challenge.encode()))
+
     try:
-        decrypted = private_key.decrypt(
-            base64.b64decode(response),
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA1()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-        is_valid = decrypted == base64.b64decode(challenge)
-        print(f"Autenticação {'bem-sucedida' if is_valid else 'falhou'} para o desafio: {challenge}")
-        return jsonify({"success": is_valid})
-    except Exception as e:
-        print("Erro ao validar a autenticação:", e)
-        return jsonify({"success": False})
+        public_key_cliente.verify(
+                signature=challenge_assinatura, 
+                data=base64.b64decode(challenge.encode()), 
+                padding=padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+                algorithm=hashes.SHA256())
+        return jsonify({"success": True})
+    except InvalidSignature as e:
+       return jsonify({"success": False})
+
 
 if __name__ == "__main__":
+    generate_server_key()
     app.run(port=5000)
